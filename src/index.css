@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'PingFang SC', 'Noto Sans SC', 'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #111827;
+  background: #f4f6fb;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.line-clamp-1,
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-1 {
+  -webkit-line-clamp: 1;
+}
+
+.line-clamp-2 {
+  -webkit-line-clamp: 2;
+}
+
+.list-stage {
+  position: relative;
+  min-height: 100%;
+}
+
+.list-incoming {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.list-incoming-anim {
+  animation: list-incoming-fade 420ms ease-out both;
+}
+
+.list-outgoing {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  animation: list-outgoing-fade 220ms ease-out both;
+}
+
+@keyframes list-incoming-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes list-outgoing-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .list-incoming-anim,
+  .list-outgoing {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,66 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.sw?
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log
+logs/
+
+# =========================
+# Rust / Tauri
+# =========================
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Local app data used by PaperWall runtime
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# =========================
+# Packaging artifacts
+# =========================
+*.app
+*.dmg
+*.pkg
+*.zip
+*.tar
+*.tar.gz
+
+# Tauri bundle outputs
+src-tauri/target/release/bundle/
+src-tauri/target/debug/bundle/
+
+# =========================
+# Env / temp
+# =========================
+.env
+.env.*
+*.local
+tmp/
+temp/
