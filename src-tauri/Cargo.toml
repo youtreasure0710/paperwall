@@ -1,6 +1,6 @@
 [package]
 name = "paperwall"
-version = "0.2.0-beta.1"
+version = "0.2.0"
 description = "PaperWall desktop app"
 authors = ["paperwall"]
 license = "MIT"

@@ -24,6 +24,7 @@ interface PaperState {
 const defaultFilters: PaperFilters = {
   query: '',
   category: 'all',
+  tag: 'all',
   readStatus: 'all',
   onlyFavorite: false,
   sortBy: 'recent',

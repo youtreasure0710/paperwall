@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -78,6 +79,7 @@ pub fn import_pdfs(
     state: State<'_, AppState>,
     paths: Vec<String>,
     duplicate_policy: Option<String>,
+    import_mode: Option<String>,
 ) -> Result<ImportResult, String> {
     if paths.is_empty() {
         return Err("no input files".to_string());
@@ -92,6 +94,7 @@ pub fn import_pdfs(
     db::ensure_other_category(&conn)?;
 
     let duplicate_policy = duplicate_policy.unwrap_or_else(|| "skip".to_string());
+    let import_mode = import_mode.unwrap_or_else(|| "reference".to_string());
 
     let mut imported = Vec::new();
     let mut skipped = Vec::new();
@@ -207,15 +210,22 @@ pub fn import_pdfs(
             }
         }
 
-        let managed_path = match copy_into_library(&original, &state.library_dir, &id, &file_name) {
-            Ok(p) => p,
-            Err(reason) => {
-                failed.push(ImportFailedItem {
-                    path,
-                    reason: format!("copy into {} failed: {reason}", state.library_dir.display()),
-                });
-                continue;
+        let (managed_path, source_path_for_thumbnail) = if import_mode == "managed" {
+            match copy_into_library(&original, &state.library_dir, &id, &file_name) {
+                Ok(p) => (p.clone(), p),
+                Err(reason) => {
+                    failed.push(ImportFailedItem {
+                        path,
+                        reason: format!("copy into {} failed: {reason}", state.library_dir.display()),
+                    });
+                    continue;
+                }
             }
+        } else {
+            (
+                PathBuf::from(format!("reference://{id}")),
+                original.clone(),
+            )
         };
 
         // Copy completed; run duplicate guard again before insert to prevent any inconsistent insertion.
@@ -228,7 +238,9 @@ pub fn import_pdfs(
         )?;
         if let Some(dup) = &duplicate_guard {
             if duplicate_policy != "keep" {
-                let _ = std::fs::remove_file(&managed_path);
+                if import_mode == "managed" {
+                    let _ = std::fs::remove_file(&managed_path);
+                }
                 skipped.push(ImportFailedItem {
                     path: original.to_string_lossy().to_string(),
                     reason: format!(
@@ -243,7 +255,7 @@ pub fn import_pdfs(
         db::upsert_category(&conn, &parsed.category)?;
         let now = Utc::now().to_rfc3339();
 
-        let thumbnail_path = match generate_thumbnail_file(&managed_path, &id, &thumbnails_dir) {
+        let thumbnail_path = match generate_thumbnail_file(&source_path_for_thumbnail, &id, &thumbnails_dir) {
             Ok(thumbnail) => Some(thumbnail.to_string_lossy().to_string()),
             Err(err) => {
                 failed.push(ImportFailedItem {
@@ -306,7 +318,8 @@ pub fn import_pdfs(
         }
 
         log::info!(
-            "import success original={} managed={} thumbnail={} hash={} duplicate={:?}",
+            "import success mode={} original={} managed={} thumbnail={} hash={} duplicate={:?}",
+            import_mode,
             paper.original_path,
             paper.managed_path,
             paper
@@ -340,12 +353,13 @@ pub fn ensure_thumbnail(state: State<'_, AppState>, id: String) -> Result<Paper,
     let thumbnails_dir = state.app_dir.join("thumbnails");
     ensure_dir(&thumbnails_dir)?;
 
-    let thumbnail = generate_thumbnail_file(Path::new(&paper.managed_path), &paper.id, &thumbnails_dir)?;
+    let source_path = resolve_paper_source_path(&paper)?;
+    let thumbnail = generate_thumbnail_file(&source_path, &paper.id, &thumbnails_dir)?;
     let thumbnail_str = thumbnail.to_string_lossy().to_string();
     log::info!(
-        "ensure_thumbnail success id={} managed={} thumbnail={}",
+        "ensure_thumbnail success id={} source={} thumbnail={}",
         paper.id,
-        paper.managed_path,
+        source_path.display(),
         thumbnail_str
     );
     db::update_partial(&conn, &paper.id, "UPDATE papers SET thumbnail_path = ?2", &thumbnail_str)
@@ -426,12 +440,36 @@ pub fn set_category(state: State<'_, AppState>, id: String, category: String) ->
 }
 
 #[tauri::command]
+pub fn add_tag_to_paper(state: State<'_, AppState>, id: String, tag: String) -> Result<Paper, String> {
+    let conn = db::open(&state.db_path)?;
+    db::migrate(&conn)?;
+    db::add_tag_to_paper(&conn, &id, &tag)
+}
+
+#[tauri::command]
+pub fn remove_tag_from_paper(state: State<'_, AppState>, id: String, tag: String) -> Result<Paper, String> {
+    let conn = db::open(&state.db_path)?;
+    db::migrate(&conn)?;
+    db::remove_tag_from_paper(&conn, &id, &tag)
+}
+
+#[tauri::command]
 pub fn assert_path_exists(path: String) -> Result<(), String> {
     if Path::new(&path).exists() {
         Ok(())
     } else {
         Err(format!("路径不存在: {path}"))
     }
+}
+
+#[tauri::command]
+pub fn write_text_file(path: String, content: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    fs::write(&target, content).map_err(|e| format!("写入文件失败: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -442,6 +480,39 @@ pub fn open_pdf_file(state: State<'_, AppState>, paper_id: String, path: String)
     open_pdf_with_settings(target, &settings)?;
     db::mark_opened(&conn, &paper_id)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn relink_paper_file(
+    state: State<'_, AppState>,
+    id: String,
+    original_path: String,
+) -> Result<Paper, String> {
+    let source = PathBuf::from(&original_path);
+    if !source.exists() {
+        return Err(format!("文件不存在: {original_path}"));
+    }
+    if !original_path.to_lowercase().ends_with(".pdf") {
+        return Err("请选择 PDF 文件".to_string());
+    }
+    let file_name = source
+        .file_name()
+        .map(|v| v.to_string_lossy().to_string())
+        .ok_or_else(|| "无法识别文件名".to_string())?;
+
+    let conn = db::open(&state.db_path)?;
+    db::migrate(&conn)?;
+    let updated = db::rebind_original_path(&conn, &id, &original_path, &file_name)?;
+
+    let use_source = resolve_paper_source_path(&updated)?;
+    let thumbnails_dir = state.app_dir.join("thumbnails");
+    ensure_dir(&thumbnails_dir)?;
+    if let Ok(thumbnail) = generate_thumbnail_file(&use_source, &updated.id, &thumbnails_dir) {
+        let thumbnail_str = thumbnail.to_string_lossy().to_string();
+        return db::update_partial(&conn, &updated.id, "UPDATE papers SET thumbnail_path = ?2", &thumbnail_str);
+    }
+
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -522,6 +593,32 @@ pub fn update_note_highlight_color(
     value["color"] = serde_json::Value::String(normalized);
     let payload = serde_json::to_string(&value).map_err(|e| format!("序列化高亮失败: {e}"))?;
     db::update_note_comment(&conn, &id, &payload)
+}
+
+#[tauri::command]
+pub fn update_note_highlight_remark(
+    state: State<'_, AppState>,
+    id: String,
+    remark: String,
+) -> Result<NoteItem, String> {
+    let conn = db::open(&state.db_path)?;
+    db::migrate(&conn)?;
+    let note = db::get_note(&conn, &id)?;
+    if note.note_type != "annotation" {
+        return Err("仅支持修改高亮备注".to_string());
+    }
+    let comment = note.comment.unwrap_or_default();
+    let value = serde_json::from_str::<serde_json::Value>(&comment)
+        .map_err(|_| "高亮数据格式无效，无法写入备注".to_string())?;
+    if value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        != "highlight"
+    {
+        return Err("当前标注不是高亮类型".to_string());
+    }
+    db::update_note_content(&conn, &id, remark.trim())
 }
 
 #[tauri::command]
@@ -716,6 +813,25 @@ fn generate_thumbnail_file(managed_path: &Path, paper_id: &str, thumbnails_dir: 
     );
 
     Ok(target)
+}
+
+fn resolve_paper_source_path(paper: &Paper) -> Result<PathBuf, String> {
+    if !paper.managed_path.trim().is_empty() && !paper.managed_path.starts_with("reference://") {
+        let managed = PathBuf::from(&paper.managed_path);
+        if managed.exists() {
+            return Ok(managed);
+        }
+    }
+    if !paper.original_path.trim().is_empty() {
+        let original = PathBuf::from(&paper.original_path);
+        if original.exists() {
+            return Ok(original);
+        }
+    }
+    Err(format!(
+        "论文文件不存在（managed_path={}, original_path={}）",
+        paper.managed_path, paper.original_path
+    ))
 }
 
 fn compute_metadata_incomplete(

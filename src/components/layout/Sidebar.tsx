@@ -1,4 +1,4 @@
-import { MoreHorizontal } from 'lucide-react';
+import { MoreHorizontal, Settings } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,6 +17,7 @@ interface SidebarProps {
   onDeleteCategory: (name: string) => Promise<void>;
   activeShelf: SmartShelfKey;
   onShelfSelect: (shelf: SmartShelfKey) => void;
+  onOpenSettings: () => void;
 }
 
 const smartShelves: Array<{ key: SmartShelfKey; label: string }> = [
@@ -43,6 +44,7 @@ export function Sidebar(props: SidebarProps) {
     onCreateCategory,
     onRenameCategory,
     onDeleteCategory,
+    onOpenSettings,
   } = props;
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -64,10 +66,10 @@ export function Sidebar(props: SidebarProps) {
   }, [menuOpenFor]);
 
   return (
-    <aside className="relative flex h-full w-64 flex-col border-r border-slate-200 bg-white/80 p-4 backdrop-blur">
-      <h1 className="mb-6 text-xl font-bold text-slate-900">PaperWall</h1>
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-        <div className="mb-2 text-[11px] font-semibold tracking-[0.16em] text-slate-500">智能书架</div>
+    <aside className="pw-sidebar relative flex h-full w-64 flex-col border-r border-[var(--border-default)] bg-[var(--bg-sidebar)] px-3 py-4 transition-colors duration-slow ease-out">
+      <h1 className="mb-5 px-2 text-xl font-semibold tracking-tight text-[var(--text-primary)]">PaperWall</h1>
+      <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="mb-2 px-2 text-[10px] font-medium tracking-[0.14em] text-[var(--text-tertiary)]/90">智能书架</div>
         <nav className="space-y-1 text-sm">
           {smartShelves.map((item) => (
             <button
@@ -81,10 +83,10 @@ export function Sidebar(props: SidebarProps) {
           ))}
         </nav>
 
-        <div className="mt-6">
-          <div className="mb-2 text-[11px] font-semibold tracking-[0.16em] text-slate-500">分类</div>
+        <div className="mt-6 border-t border-[var(--border-default)]/70 pt-4">
+          <div className="mb-2 px-2 text-[10px] font-medium tracking-[0.14em] text-[var(--text-tertiary)]/90">分类</div>
           {creatingCategory && (
-            <div className="mb-2 space-y-1 rounded-md border border-slate-200 bg-slate-50 p-2">
+            <div className="mb-2 space-y-1 rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface)] p-2">
               <Input placeholder="输入分类名称" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} className="h-8 text-xs" />
               <div className="flex gap-1">
                 <Button
@@ -114,7 +116,7 @@ export function Sidebar(props: SidebarProps) {
                 全部分类
               </button>
               <button
-                className="rounded border border-slate-200 px-1.5 py-1 text-xs text-slate-600 hover:bg-slate-100"
+                className="rounded-md border border-[var(--border-default)] px-1.5 py-1 text-[11px] text-[var(--text-secondary)] transition-colors duration-base hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
                 onClick={() => setCreatingCategory((v) => !v)}
               >
                 +
@@ -133,7 +135,7 @@ export function Sidebar(props: SidebarProps) {
                     {papers.filter((paper) => paper.category === category).length}
                   </Badge>
                   <button
-                    className="ml-1 rounded p-0.5 text-slate-500 hover:bg-slate-200 opacity-0 group-hover/category:opacity-100"
+                    className="ml-1 rounded-md p-0.5 text-[var(--text-tertiary)] opacity-0 transition-[opacity,background-color,transform,color] duration-base ease-out hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] active:scale-95 group-hover/category:opacity-100"
                     onClick={(e) => {
                       e.stopPropagation();
                       setMenuOpenFor((prev) => (prev === category ? null : category));
@@ -143,7 +145,7 @@ export function Sidebar(props: SidebarProps) {
                   </button>
                 </div>
                 {renamingCategory === category && (
-                  <div className="mt-1 space-y-1 rounded-md border border-slate-200 bg-slate-50 p-2">
+                  <div className="mt-1 space-y-1 rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface)] p-2">
                     <Input
                       value={renameValue}
                       onChange={(e) => setRenameValue(e.target.value)}
@@ -179,10 +181,10 @@ export function Sidebar(props: SidebarProps) {
                 {menuOpenFor === category && (
                   <div
                     ref={menuRef}
-                    className="absolute right-1 top-8 z-20 w-28 rounded-md border border-slate-200 bg-white p-1 shadow-md"
+                    className="pw-popover-surface absolute right-1 top-8 z-20 w-28 p-1"
                   >
                     <button
-                      className="w-full rounded px-2 py-1.5 text-left text-xs hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"
+                      className="pw-menu-item w-full px-2 py-1.5 text-left text-xs disabled:cursor-not-allowed disabled:text-[var(--text-tertiary)]"
                       disabled={category === 'Other'}
                       onClick={async (e) => {
                         e.stopPropagation();
@@ -195,7 +197,7 @@ export function Sidebar(props: SidebarProps) {
                       重命名
                     </button>
                     <button
-                      className="w-full rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                      className="w-full rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-xs text-red-600 transition-colors duration-[var(--motion-fast)] ease-out hover:bg-red-50/80 disabled:cursor-not-allowed disabled:text-[var(--text-tertiary)]"
                       disabled={category === 'Other'}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -214,14 +216,26 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </div>
 
-      <div className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-400">
-        <div>v0.1.0</div>
-        <div className="mt-1">Designed &amp; Developed by TreasureU</div>
+      <div className="mt-4 border-t border-[var(--border-default)]/70 px-1 pt-3 text-xs text-[var(--text-tertiary)]">
+        <button
+          type="button"
+          className="mb-2 inline-flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--text-secondary)] transition-[background-color,color,transform] duration-base ease-out hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] active:scale-[0.995]"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onOpenSettings();
+          }}
+        >
+          <Settings className="h-4 w-4" />
+          <span>设置</span>
+        </button>
+        <div className="px-1 text-[11px]">v0.2.0</div>
+        <div className="mt-1 px-1 text-[11px]">Designed &amp; Developed by TreasureU</div>
       </div>
       {confirmDeleteCategory && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-900/30 p-3">
-          <div className="w-full max-w-56 rounded-md border border-slate-200 bg-white p-3 shadow-lg">
-            <p className="text-xs text-slate-700">
+        <div className="pw-overlay-scrim absolute inset-0 z-40 flex items-center justify-center p-3">
+          <div className="pw-dialog-surface w-full max-w-56 p-3">
+            <p className="text-xs text-[var(--text-secondary)]">
               确定删除分类“{confirmDeleteCategory}”吗？该分类下论文将回退到 Other。
             </p>
             <div className="mt-3 flex justify-end gap-2">
@@ -234,7 +248,7 @@ export function Sidebar(props: SidebarProps) {
               </Button>
               <Button
                 size="sm"
-                className="bg-red-600 text-white hover:bg-red-700"
+                className="pw-danger-btn"
                 onClick={async () => {
                   const target = confirmDeleteCategory;
                   setConfirmDeleteCategory(null);
@@ -254,17 +268,17 @@ export function Sidebar(props: SidebarProps) {
 
 function itemClass(active: boolean) {
   return cn(
-    'relative flex w-full items-center rounded-md px-2 py-1.5 text-left text-slate-700 transition-colors hover:bg-slate-100/90 hover:text-slate-900',
+    'relative flex h-9 w-full items-center rounded-md px-2.5 py-1.5 text-left text-[var(--text-secondary)] transition-[background-color,color,box-shadow] duration-slow ease-out hover:bg-[var(--bg-hover)]/72 hover:text-[var(--text-primary)] motion-reduce:transition-none',
     active &&
-      'bg-blue-50/90 text-blue-900 font-semibold shadow-[inset_0_0_0_1px_rgba(59,130,246,0.16)] before:absolute before:bottom-1 before:left-0 before:top-1 before:w-1 before:rounded-r before:bg-blue-500'
+      'bg-[var(--selected-bg)] text-[var(--accent-text)] font-semibold shadow-[inset_0_0_0_1px_var(--selected-border)] before:absolute before:bottom-[7px] before:left-[4px] before:top-[7px] before:w-[2px] before:rounded-full before:bg-[var(--accent-default)]'
   );
 }
 
 function badgeClass(active: boolean) {
   return cn(
-    'ml-auto transition-colors',
+    'ml-auto text-[10px] transition-[background-color,color,border-color] duration-base ease-out',
     active
-      ? 'border-blue-200 bg-blue-100 text-blue-800'
-      : 'border-slate-200 bg-slate-100 text-slate-600'
+      ? 'border-[var(--accent-border)] bg-[var(--selected-bg)]/85 text-[var(--accent-text)]'
+      : 'border-[var(--border-default)] bg-[var(--bg-surface)] text-[var(--text-tertiary)]'
   );
 }

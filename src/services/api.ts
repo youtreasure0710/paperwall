@@ -10,6 +10,8 @@ export interface ImportResult {
   failed: Array<{ path: string; reason: string }>;
 }
 
+export type ImportMode = 'reference' | 'managed';
+
 export interface MetadataEnrichResult {
   updated?: Paper;
   source?: string;
@@ -45,8 +47,12 @@ export async function deleteCategory(name: string) {
   return invoke<void>('delete_category', { name });
 }
 
-export async function importPdfs(paths: string[], duplicatePolicy: 'skip' | 'keep' = 'skip') {
-  return invoke<ImportResult>('import_pdfs', { paths, duplicatePolicy });
+export async function importPdfs(
+  paths: string[],
+  duplicatePolicy: 'skip' | 'keep' = 'skip',
+  importMode: ImportMode = 'reference',
+) {
+  return invoke<ImportResult>('import_pdfs', { paths, duplicatePolicy, importMode });
 }
 
 export async function updatePaper(paper: Paper) {
@@ -73,6 +79,14 @@ export async function setCategory(id: string, category: string) {
   return invoke<Paper>('set_category', { id, category });
 }
 
+export async function addTagToPaper(id: string, tag: string) {
+  return invoke<Paper>('add_tag_to_paper', { id, tag });
+}
+
+export async function removeTagFromPaper(id: string, tag: string) {
+  return invoke<Paper>('remove_tag_from_paper', { id, tag });
+}
+
 export async function updateNotes(id: string, notes: string) {
   return invoke<Paper>('update_notes', { id, notes });
 }
@@ -97,8 +111,16 @@ export async function assertPathExists(path: string) {
   return invoke<void>('assert_path_exists', { path });
 }
 
+export async function writeTextFile(path: string, content: string) {
+  return invoke<void>('write_text_file', { path, content });
+}
+
 export async function openPdfFile(paperId: string, path: string) {
   return invoke<void>('open_pdf_file', { paperId, path });
+}
+
+export async function relinkPaperFile(id: string, originalPath: string) {
+  return invoke<Paper>('relink_paper_file', { id, originalPath });
 }
 
 export async function deletePaper(id: string) {
@@ -119,6 +141,10 @@ export async function deleteNote(id: string) {
 
 export async function updateNoteHighlightColor(id: string, color: 'yellow' | 'blue' | 'red') {
   return invoke<NoteItem>('update_note_highlight_color', { id, color });
+}
+
+export async function updateNoteHighlightRemark(id: string, remark: string) {
+  return invoke<NoteItem>('update_note_highlight_remark', { id, remark });
 }
 
 export async function getAppSettings() {

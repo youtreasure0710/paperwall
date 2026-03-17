@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{FixedOffset, Utc};
 use rusqlite::{params, Connection};
 
 use crate::models::{AppSettings, Category, CreateNoteInput, NoteItem, Paper};
@@ -10,6 +10,7 @@ const MIGRATION_002: &str = include_str!("../migrations/002_categories.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003_v02.sql");
 const MIGRATION_004: &str = include_str!("../migrations/004_reading_notes.sql");
 const MIGRATION_005: &str = include_str!("../migrations/005_title_quality.sql");
+const MIGRATION_006: &str = include_str!("../migrations/006_tags.sql");
 const DEFAULT_CATEGORIES: [&str; 10] = [
     "LLM",
     "NLP",
@@ -71,6 +72,19 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             return Err(format!("migrate failed: {e}"));
         }
     }
+    for stmt in MIGRATION_006.split(';') {
+        let sql = stmt.trim();
+        if sql.is_empty() {
+            continue;
+        }
+        if let Err(e) = conn.execute_batch(sql) {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("duplicate column name") {
+                continue;
+            }
+            return Err(format!("migrate failed: {e}"));
+        }
+    }
     Ok(())
 }
 
@@ -108,6 +122,12 @@ pub fn list_papers(conn: &Connection) -> Result<Vec<Paper>, String> {
         .prepare(
             "SELECT
                 p.*,
+                COALESCE((
+                    SELECT json_group_array(t.name)
+                    FROM paper_tags pt
+                    JOIN tags t ON t.id = pt.tag_id
+                    WHERE pt.paper_id = p.id
+                ), '[]') AS resolved_tags,
                 CASE
                     WHEN TRIM(COALESCE(p.notes, '')) <> '' THEN 1
                     WHEN EXISTS (SELECT 1 FROM notes n WHERE n.paper_id = p.id LIMIT 1) THEN 1
@@ -128,6 +148,12 @@ pub fn get_paper(conn: &Connection, id: &str) -> Result<Paper, String> {
         .prepare(
             "SELECT
                 p.*,
+                COALESCE((
+                    SELECT json_group_array(t.name)
+                    FROM paper_tags pt
+                    JOIN tags t ON t.id = pt.tag_id
+                    WHERE pt.paper_id = p.id
+                ), '[]') AS resolved_tags,
                 CASE
                     WHEN TRIM(COALESCE(p.notes, '')) <> '' THEN 1
                     WHEN EXISTS (SELECT 1 FROM notes n WHERE n.paper_id = p.id LIMIT 1) THEN 1
@@ -188,6 +214,7 @@ pub fn insert_paper(conn: &Connection, paper: &Paper) -> Result<(), String> {
         ],
     )
     .map_err(|e| format!("insert failed: {e}"))?;
+    replace_paper_tags(conn, &paper.id, &paper.tags)?;
     Ok(())
 }
 
@@ -251,6 +278,7 @@ pub fn update_paper(conn: &Connection, paper: &Paper) -> Result<Paper, String> {
         ],
     )
     .map_err(|e| format!("update failed: {e}"))?;
+    replace_paper_tags(conn, &paper.id, &paper.tags)?;
     get_paper(conn, &paper.id)
 }
 
@@ -280,9 +308,88 @@ pub fn set_managed_path(conn: &Connection, id: &str, file_name: &str, managed_pa
     get_paper(conn, id)
 }
 
+pub fn add_tag_to_paper(conn: &Connection, paper_id: &str, tag_name: &str) -> Result<Paper, String> {
+    let trimmed = tag_name.trim();
+    if trimmed.is_empty() {
+        return Err("标签名称不能为空".to_string());
+    }
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?1, ?2)",
+        params![trimmed, now],
+    )
+    .map_err(|e| format!("创建标签失败: {e}"))?;
+    let tag_id: i64 = conn
+        .query_row(
+            "SELECT id FROM tags WHERE lower(name) = lower(?1) LIMIT 1",
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("读取标签失败: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO paper_tags (paper_id, tag_id, created_at) VALUES (?1, ?2, ?3)",
+        params![paper_id, tag_id, now],
+    )
+    .map_err(|e| format!("关联标签失败: {e}"))?;
+    get_paper(conn, paper_id)
+}
+
+pub fn remove_tag_from_paper(conn: &Connection, paper_id: &str, tag_name: &str) -> Result<Paper, String> {
+    let trimmed = tag_name.trim();
+    if trimmed.is_empty() {
+        return Err("标签名称不能为空".to_string());
+    }
+    conn.execute(
+        "DELETE FROM paper_tags
+         WHERE paper_id = ?1
+           AND tag_id IN (SELECT id FROM tags WHERE lower(name) = lower(?2))",
+        params![paper_id, trimmed],
+    )
+    .map_err(|e| format!("移除标签失败: {e}"))?;
+    conn.execute(
+        "DELETE FROM tags
+         WHERE id NOT IN (SELECT DISTINCT tag_id FROM paper_tags)",
+        [],
+    )
+    .map_err(|e| format!("清理孤立标签失败: {e}"))?;
+    get_paper(conn, paper_id)
+}
+
 pub fn delete_paper(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM papers WHERE id = ?1", params![id])
         .map_err(|e| format!("delete paper failed: {e}"))?;
+    Ok(())
+}
+
+fn replace_paper_tags(conn: &Connection, paper_id: &str, tags: &[String]) -> Result<(), String> {
+    conn.execute("DELETE FROM paper_tags WHERE paper_id = ?1", params![paper_id])
+        .map_err(|e| format!("清空旧标签失败: {e}"))?;
+    let now = Utc::now().to_rfc3339();
+    for name in tags.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?1, ?2)",
+            params![name, now],
+        )
+        .map_err(|e| format!("创建标签失败: {e}"))?;
+        let tag_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tags WHERE lower(name) = lower(?1) LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取标签失败: {e}"))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO paper_tags (paper_id, tag_id, created_at) VALUES (?1, ?2, ?3)",
+            params![paper_id, tag_id, now],
+        )
+        .map_err(|e| format!("关联标签失败: {e}"))?;
+    }
+    conn.execute(
+        "DELETE FROM tags
+         WHERE id NOT IN (SELECT DISTINCT tag_id FROM paper_tags)",
+        [],
+    )
+    .map_err(|e| format!("清理孤立标签失败: {e}"))?;
     Ok(())
 }
 
@@ -297,7 +404,8 @@ pub fn mark_opened(conn: &Connection, id: &str) -> Result<(), String> {
 }
 
 pub fn update_read_progress(conn: &Connection, id: &str, page: i32) -> Result<Paper, String> {
-    let now = Utc::now().to_rfc3339();
+    let tz = FixedOffset::east_opt(8 * 3600).ok_or_else(|| "invalid timezone offset".to_string())?;
+    let now = Utc::now().with_timezone(&tz).to_rfc3339();
     conn.execute(
         "UPDATE papers SET last_opened_at = ?2, last_read_page = ?3, last_read_at = ?2, updated_at = ?2 WHERE id = ?1",
         params![id, now, page],
@@ -359,6 +467,16 @@ pub fn update_note_comment(conn: &Connection, id: &str, comment: &str) -> Result
         params![id, comment, now],
     )
     .map_err(|e| format!("update note comment failed: {e}"))?;
+    get_note(conn, id)
+}
+
+pub fn update_note_content(conn: &Connection, id: &str, content: &str) -> Result<NoteItem, String> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE notes SET content = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, content, now],
+    )
+    .map_err(|e| format!("update note content failed: {e}"))?;
     get_note(conn, id)
 }
 
@@ -598,4 +716,19 @@ pub fn save_app_settings(conn: &Connection, settings: &AppSettings) -> Result<Ap
         settings.external_reader_path.as_deref().unwrap_or(""),
     )?;
     get_app_settings(conn)
+}
+
+pub fn rebind_original_path(
+    conn: &Connection,
+    id: &str,
+    original_path: &str,
+    file_name: &str,
+) -> Result<Paper, String> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE papers SET original_path = ?2, file_name = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, original_path, file_name, now],
+    )
+    .map_err(|e| format!("更新原文件路径失败: {e}"))?;
+    get_paper(conn, id)
 }
