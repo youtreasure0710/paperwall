@@ -361,7 +361,6 @@ export function DetailDrawer(props: DetailDrawerProps) {
         >
           重新分类
         </Button>
-        <Button size="sm" onClick={() => void handleSaveMeta()}>保存修改</Button>
         <Button
           variant="secondary"
           size="sm"
@@ -445,11 +444,16 @@ export function DetailDrawer(props: DetailDrawerProps) {
               <Input value={editable.arxiv_id ?? ''} onChange={(e) => setEditable({ ...editable, arxiv_id: e.target.value })} />
             </div>
           </div>
-          <div className="text-xs text-[var(--text-secondary)]">
-            分类：<Badge>{currentPaper.category || 'Other'}</Badge>
-          </div>
-          <div className="text-xs text-[var(--text-secondary)]">
-            元数据状态：<Badge>{currentPaper.is_metadata_incomplete ? '不完整' : '完整'}</Badge>
+          <div className="flex items-end justify-between gap-3">
+            <div className="space-y-1">
+              <div className="text-xs text-[var(--text-secondary)]">
+                分类：<Badge>{currentPaper.category || 'Other'}</Badge>
+              </div>
+              <div className="text-xs text-[var(--text-secondary)]">
+                元数据状态：<Badge>{currentPaper.is_metadata_incomplete ? '不完整' : '完整'}</Badge>
+              </div>
+            </div>
+            <Button size="sm" onClick={() => void handleSaveMeta()}>保存修改</Button>
           </div>
           {currentPaper.duplicate_reason && (
             <div className="text-xs text-amber-700 dark:text-amber-300">重复候选：{currentPaper.duplicate_reason}</div>
@@ -459,11 +463,6 @@ export function DetailDrawer(props: DetailDrawerProps) {
         <section className="space-y-2.5 rounded-xl border border-[var(--border-default)]/70 bg-[var(--bg-surface-secondary)]/52 p-3.5">
           <h4 className="text-[11px] font-medium tracking-[0.12em] text-[var(--text-tertiary)]">摘要</h4>
           <Textarea value={editable.abstract} onChange={(e) => setEditable({ ...editable, abstract: e.target.value })} className="min-h-24" />
-        </section>
-
-        <section className="space-y-2.5 rounded-xl border border-[var(--border-default)]/70 bg-[var(--bg-surface-secondary)]/52 p-3.5">
-          <h4 className="text-[11px] font-medium tracking-[0.12em] text-[var(--text-tertiary)]">简介</h4>
-          <Textarea value={editable.summary} onChange={(e) => setEditable({ ...editable, summary: e.target.value })} className="min-h-20" />
         </section>
 
         <section className="space-y-2.5 rounded-xl border border-[var(--border-default)]/70 bg-[var(--bg-surface-secondary)]/52 p-3.5">

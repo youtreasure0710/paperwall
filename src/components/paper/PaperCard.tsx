@@ -53,7 +53,7 @@ export function PaperCard({
     <article
       data-paper-card="true"
       className={cn(
-        'pw-paper-card group relative cursor-pointer rounded-xl border border-[var(--border-default)] bg-[var(--bg-surface)] p-3.5 shadow-[var(--shadow-sm)] transition-[transform,box-shadow,border-color,background-color] duration-slow ease-out motion-reduce:transition-none motion-reduce:hover:transform-none hover:-translate-y-[1px] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-secondary)] hover:!shadow-[0_18px_34px_-16px_rgba(0,0,0,0.58)] active:translate-y-0 active:scale-[0.997]',
+        'pw-paper-card group relative w-[260px] min-w-[260px] cursor-pointer rounded-xl border border-[var(--border-default)] bg-[var(--bg-surface)] p-3.5 shadow-[var(--shadow-sm)] transition-[transform,box-shadow,border-color,background-color] duration-slow ease-out motion-reduce:transition-none motion-reduce:hover:transform-none hover:-translate-y-[1px] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-secondary)] hover:!shadow-[0_18px_34px_-16px_rgba(0,0,0,0.58)] active:translate-y-0 active:scale-[0.997]',
         selected && multiSelectMode && 'ring-1 ring-[var(--accent-default)]/35',
       )}
       onClick={() => {

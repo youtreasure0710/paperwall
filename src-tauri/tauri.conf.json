@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "PaperWall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.paperwall.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -25,7 +25,11 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/PaperWall/**"
+          "$HOME/PaperWall/**",
+          "$HOME/Desktop/**",
+          "$HOME/Documents/**",
+          "$HOME/Downloads/**",
+          "$HOME/**"
         ]
       }
     }

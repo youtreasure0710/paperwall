@@ -723,16 +723,29 @@ function App() {
   async function onOpenPdf(paper: Paper) {
     try {
       const filePath = resolvePaperFilePath(paper);
+      console.info('[open_pdf] click', {
+        paperId: paper.id,
+        originalPath: paper.original_path,
+        managedPath: paper.managed_path,
+        resolvedPath: filePath,
+      });
       if (!filePath) {
         setError('未找到可打开的 PDF 路径。');
         setPendingRelinkPaper(paper);
         setPendingRelinkReason('找不到可用的论文文件路径。');
         return;
       }
-      await assertPathExists(filePath);
       await openPdfFile(paper.id, filePath);
+      console.info('[open_pdf] open_success', { paperId: paper.id, resolvedPath: filePath });
       await refreshData();
     } catch (err) {
+      console.warn('[open_pdf] open_failed', {
+        paperId: paper.id,
+        originalPath: paper.original_path,
+        managedPath: paper.managed_path,
+        resolvedPath: resolvePaperFilePath(paper),
+        err: String(err),
+      });
       setError(`打开 PDF 失败：${String(err)}。若使用“引用原文件”，请确认原文件未被移动或删除。`);
       setPendingRelinkPaper(paper);
       setPendingRelinkReason('原始 PDF 文件可能已被移动、重命名或删除。');
@@ -1005,14 +1018,8 @@ function App() {
       );
     }
     if (mode === 'grid') {
-      const sparseClass =
-        items.length === 1
-          ? 'mx-auto w-full max-w-[360px] grid-cols-1 md:grid-cols-1 lg:grid-cols-1 xl:grid-cols-1'
-          : items.length === 2
-            ? 'mx-auto w-full max-w-[760px] md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2'
-            : '';
       return (
-        <div className={`grid grid-cols-2 gap-5 md:grid-cols-3 lg:gap-6 lg:grid-cols-4 xl:grid-cols-5 ${sparseClass}`}>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,260px))] justify-start gap-5 lg:gap-6">
           {items.map((paper) => (
             <PaperCard
               key={paper.id}
@@ -1312,7 +1319,7 @@ function App() {
 
               <section className="space-y-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface-secondary)]/55 p-3">
                 <h4 className="text-[11px] font-medium tracking-[0.12em] text-[var(--text-tertiary)]">关于</h4>
-                <div className="text-xs text-[var(--text-secondary)]">版本：v0.2.0</div>
+                <div className="text-xs text-[var(--text-secondary)]">版本：v0.3.0</div>
                 <a className="inline-block text-xs text-[var(--accent-default)]/95 hover:underline" href="https://github.com/" target="_blank" rel="noreferrer">
                   GitHub 仓库
                 </a>

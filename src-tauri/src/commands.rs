@@ -1,10 +1,14 @@
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use base64::Engine as _;
 use chrono::Utc;
+use percent_encoding::percent_decode_str;
+use pdfium_render::prelude::*;
 use tauri::State;
+use url::Url;
 use uuid::Uuid;
 
 use crate::db;
@@ -20,6 +24,251 @@ use crate::services::metadata::parse_metadata;
 use crate::services::metadata_enrichment::{enrich_metadata, EnrichedMetadata};
 use crate::services::rename::suggestion;
 use crate::AppState;
+
+fn safe_extract_text_for_import(pdf_path: &Path) -> String {
+    let path_display = pdf_path.display().to_string();
+    log::info!("[import] fulltext_extract_start path={path_display}");
+    let started = std::time::Instant::now();
+
+    let extracted = catch_unwind(AssertUnwindSafe(|| pdf_extract::extract_text(pdf_path)));
+    match extracted {
+        Ok(Ok(text)) => {
+            log::info!(
+                "[import] fulltext_extract_success path={} elapsed_ms={} text_len={}",
+                path_display,
+                started.elapsed().as_millis(),
+                text.len()
+            );
+            text
+        }
+        Ok(Err(err)) => {
+            log::warn!(
+                "[import] fulltext_extract_failed path={} elapsed_ms={} err={}",
+                path_display,
+                started.elapsed().as_millis(),
+                err
+            );
+            String::new()
+        }
+        Err(_) => {
+            log::error!(
+                "[import] fulltext_extract_panic_caught path={} elapsed_ms={} (fallback to empty text)",
+                path_display,
+                started.elapsed().as_millis()
+            );
+            String::new()
+        }
+    }
+}
+
+fn normalize_user_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed.starts_with("file://") {
+        if let Ok(url) = Url::parse(trimmed) {
+            if let Ok(path) = url.to_file_path() {
+                return path.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    // Some environments may pass plain paths with percent-encoding
+    // (for example "/Users/me/My%20Paper.pdf"). Decode as a safe fallback.
+    if trimmed.contains('%') {
+        let decoded = percent_decode_str(trimmed).decode_utf8_lossy().to_string();
+        if !decoded.trim().is_empty() {
+            return decoded;
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn metadata_preview(text: &str) -> String {
+    text.chars().take(1600).collect::<String>().replace('\n', "\\n")
+}
+
+fn bind_pdfium_for_import() -> Result<Box<dyn PdfiumLibraryBindings>, String> {
+    if let Ok(bindings) = Pdfium::bind_to_system_library() {
+        log::info!("[import] pdfium_bind source=system");
+        return Ok(bindings);
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs.push(exe_dir.join("pdfium"));
+            dirs.push(exe_dir.join("../Resources/pdfium"));
+            dirs.push(exe_dir.join("../../Resources/pdfium"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("src-tauri/target/debug/pdfium"));
+        dirs.push(cwd.join("src-tauri/target/release/pdfium"));
+    }
+
+    let mut last_err: Option<String> = None;
+    for dir in dirs {
+        let lib_path = Pdfium::pdfium_platform_library_name_at_path(&dir);
+        if !Path::new(&lib_path).exists() {
+            continue;
+        }
+        match Pdfium::bind_to_library(&lib_path) {
+            Ok(bindings) => {
+                log::info!(
+                    "[import] pdfium_bind source=local path={}",
+                    Path::new(&lib_path).display()
+                );
+                return Ok(bindings);
+            }
+            Err(err) => {
+                last_err = Some(format!("{} ({})", err, Path::new(&lib_path).display()));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "no usable pdfium library found".to_string()))
+}
+
+fn extract_metadata_text_pdfium(pdf_path: &Path) -> Result<String, String> {
+    let bindings = bind_pdfium_for_import()?;
+    let pdfium = Pdfium::new(bindings);
+    let doc = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .map_err(|e| format!("load pdf failed: {e}"))?;
+    let page_count = doc.pages().len();
+    let max_pages = page_count.min(2);
+    let mut out = String::new();
+    for idx in 0..max_pages {
+        let page = doc
+            .pages()
+            .get(idx)
+            .map_err(|e| format!("get page {} failed: {e}", idx + 1))?;
+        let text = page
+            .text()
+            .map_err(|e| format!("extract page {} text failed: {e}", idx + 1))?
+            .all();
+        if !text.trim().is_empty() {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn extract_metadata_text_lopdf(pdf_path: &Path) -> Result<String, String> {
+    let doc = lopdf::Document::load(pdf_path).map_err(|e| format!("load with lopdf failed: {e}"))?;
+    let mut pages: Vec<u32> = doc.get_pages().keys().copied().collect();
+    pages.sort_unstable();
+    pages.truncate(2);
+    if pages.is_empty() {
+        return Ok(String::new());
+    }
+    doc.extract_text(&pages)
+        .map_err(|e| format!("lopdf extract_text failed: {e}"))
+}
+
+fn extract_metadata_text_for_import(pdf_path: &Path) -> (String, &'static str) {
+    let path_display = pdf_path.display().to_string();
+
+    log::info!(
+        "[import] metadata extraction start source=pdfium-metadata path={}",
+        path_display
+    );
+    let pdfium_started = std::time::Instant::now();
+    match extract_metadata_text_pdfium(pdf_path) {
+        Ok(text) if !text.trim().is_empty() => {
+            log::info!(
+                "[import] metadata extraction success source=pdfium-metadata path={} elapsed_ms={} chars={}",
+                path_display,
+                pdfium_started.elapsed().as_millis(),
+                text.chars().count()
+            );
+            log::info!(
+                "[import] metadata extraction preview source=pdfium-metadata path={} text={}",
+                path_display,
+                metadata_preview(&text)
+            );
+            return (text, "pdfium-metadata");
+        }
+        Ok(_) => {
+            log::warn!(
+                "[import] metadata extraction empty source=pdfium-metadata path={} elapsed_ms={}",
+                path_display,
+                pdfium_started.elapsed().as_millis()
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                "[import] metadata extraction failed source=pdfium-metadata path={} elapsed_ms={} err={}",
+                path_display,
+                pdfium_started.elapsed().as_millis(),
+                err
+            );
+        }
+    }
+
+    log::info!(
+        "[import] metadata extraction start source=lopdf-fallback path={}",
+        path_display
+    );
+    let lopdf_started = std::time::Instant::now();
+    match extract_metadata_text_lopdf(pdf_path) {
+        Ok(text) if !text.trim().is_empty() => {
+            log::warn!(
+                "[import] metadata extraction success source=lopdf-fallback path={} elapsed_ms={} chars={}",
+                path_display,
+                lopdf_started.elapsed().as_millis(),
+                text.chars().count()
+            );
+            log::warn!(
+                "[import] metadata extraction preview source=lopdf-fallback path={} text={}",
+                path_display,
+                metadata_preview(&text)
+            );
+            return (text, "lopdf-fallback");
+        }
+        Ok(_) => {
+            log::warn!(
+                "[import] metadata extraction empty source=lopdf-fallback path={} elapsed_ms={}",
+                path_display,
+                lopdf_started.elapsed().as_millis()
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                "[import] metadata extraction failed source=lopdf-fallback path={} elapsed_ms={} err={}",
+                path_display,
+                lopdf_started.elapsed().as_millis(),
+                err
+            );
+        }
+    }
+
+    let text = safe_extract_text_for_import(pdf_path);
+    if !text.trim().is_empty() {
+        log::warn!(
+            "[import] metadata extraction success source=pdf_extract-fulltext-fallback path={} chars={}",
+            path_display,
+            text.chars().count()
+        );
+        log::warn!(
+            "[import] metadata extraction preview source=pdf_extract-fulltext-fallback path={} text={}",
+            path_display,
+            metadata_preview(&text)
+        );
+        return (text, "pdf_extract-fulltext-fallback");
+    }
+
+    log::warn!(
+        "[import] metadata extraction failed source=empty path={} (all strategies exhausted)",
+        path_display
+    );
+    (String::new(), "empty")
+}
 
 #[tauri::command]
 pub fn init_app(state: State<'_, AppState>) -> Result<(), String> {
@@ -100,12 +349,16 @@ pub fn import_pdfs(
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
 
-    for path in paths {
-        log::info!("import start path={path}");
+    for raw_path in paths {
+        let path = normalize_user_path(&raw_path);
+        log::info!(
+            "[import] input_path raw={} normalized={} mode={}",
+            raw_path, path, import_mode
+        );
         let original = PathBuf::from(&path);
         if !original.exists() || !path.to_lowercase().ends_with(".pdf") {
             failed.push(ImportFailedItem {
-                path,
+                path: raw_path,
                 reason: "not a valid pdf".to_string(),
             });
             continue;
@@ -121,13 +374,29 @@ pub fn import_pdfs(
         let file_name = file_name_os.to_string_lossy().to_string();
         let id = Uuid::new_v4().to_string();
 
-        let first_page_text = pdf_extract::extract_text(&original)
-            .unwrap_or_default()
+        let (metadata_text, metadata_source) = extract_metadata_text_for_import(&original);
+        let first_page_text = metadata_text
             .chars()
-            .take(4000)
+            .take(12000)
             .collect::<String>();
+        log::info!(
+            "[import] metadata_text_ready source={} path={} len={}",
+            metadata_source,
+            original.display(),
+            first_page_text.len()
+        );
 
         let parsed = parse_metadata(&file_name, &first_page_text);
+        log::info!(
+            "[import] metadata parsed source={} path={} title={} authors={} year={:?} doi={:?} arxiv={:?}",
+            metadata_source,
+            original.display(),
+            parsed.title,
+            parsed.authors.len(),
+            parsed.year,
+            parsed.doi,
+            parsed.arxiv_id
+        );
         let mut final_title = parsed.title.clone();
         let mut final_title_source = parsed.title_source.clone();
         let mut final_title_confidence = parsed.title_confidence;
@@ -215,7 +484,7 @@ pub fn import_pdfs(
                 Ok(p) => (p.clone(), p),
                 Err(reason) => {
                     failed.push(ImportFailedItem {
-                        path,
+                        path: raw_path.clone(),
                         reason: format!("copy into {} failed: {reason}", state.library_dir.display()),
                     });
                     continue;
@@ -310,6 +579,11 @@ pub fn import_pdfs(
         };
 
         if let Err(reason) = db::insert_paper(&conn, &paper) {
+            log::warn!(
+                "[import] insert_failed path={} reason={}",
+                original.display(),
+                reason
+            );
             failed.push(ImportFailedItem {
                 path: original.to_string_lossy().to_string(),
                 reason,
@@ -455,10 +729,23 @@ pub fn remove_tag_from_paper(state: State<'_, AppState>, id: String, tag: String
 
 #[tauri::command]
 pub fn assert_path_exists(path: String) -> Result<(), String> {
-    if Path::new(&path).exists() {
+    let normalized = normalize_user_path(&path);
+    log::info!(
+        "[open_pdf] assert_path_exists_start raw={} normalized={}",
+        path, normalized
+    );
+    if Path::new(&normalized).exists() {
+        log::info!(
+            "[open_pdf] assert_path_exists_success normalized={}",
+            normalized
+        );
         Ok(())
     } else {
-        Err(format!("路径不存在: {path}"))
+        log::warn!(
+            "[open_pdf] assert_path_exists_failed raw={} normalized={}",
+            path, normalized
+        );
+        Err(format!("路径不存在: {}", normalized))
     }
 }
 
@@ -476,9 +763,44 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 pub fn open_pdf_file(state: State<'_, AppState>, paper_id: String, path: String) -> Result<(), String> {
     let conn = db::open(&state.db_path)?;
     let settings = db::get_app_settings(&conn)?;
-    let target = Path::new(&path);
-    open_pdf_with_settings(target, &settings)?;
+    let paper = db::get_paper(&conn, &paper_id)?;
+    let normalized_path = normalize_user_path(&path);
+    let input_target = Path::new(&normalized_path);
+    let db_target = resolve_paper_source_path(&paper).ok();
+
+    let chosen: PathBuf = if input_target.exists() {
+        input_target.to_path_buf()
+    } else if let Some(path_from_db) = db_target.as_ref() {
+        path_from_db.clone()
+    } else {
+        return Err(format!(
+            "论文文件不存在（input={}, original_path={}, managed_path={}）",
+            normalized_path,
+            paper.original_path,
+            paper.managed_path
+        ));
+    };
+
+    log::info!(
+        "[open_pdf] open_start paper_id={} raw={} normalized={} input_exists={} db_source={} chosen={} reader_mode={}",
+        paper_id,
+        path,
+        normalized_path,
+        input_target.exists(),
+        db_target
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string()),
+        chosen.display(),
+        settings.reader_mode
+    );
+    open_pdf_with_settings(&chosen, &settings)?;
     db::mark_opened(&conn, &paper_id)?;
+    log::info!(
+        "[open_pdf] open_success paper_id={} chosen={}",
+        paper_id,
+        chosen.display()
+    );
     Ok(())
 }
 
@@ -488,11 +810,12 @@ pub fn relink_paper_file(
     id: String,
     original_path: String,
 ) -> Result<Paper, String> {
-    let source = PathBuf::from(&original_path);
+    let normalized_original_path = normalize_user_path(&original_path);
+    let source = PathBuf::from(&normalized_original_path);
     if !source.exists() {
-        return Err(format!("文件不存在: {original_path}"));
+        return Err(format!("文件不存在: {normalized_original_path}"));
     }
-    if !original_path.to_lowercase().ends_with(".pdf") {
+    if !normalized_original_path.to_lowercase().ends_with(".pdf") {
         return Err("请选择 PDF 文件".to_string());
     }
     let file_name = source
@@ -502,7 +825,7 @@ pub fn relink_paper_file(
 
     let conn = db::open(&state.db_path)?;
     db::migrate(&conn)?;
-    let updated = db::rebind_original_path(&conn, &id, &original_path, &file_name)?;
+    let updated = db::rebind_original_path(&conn, &id, &normalized_original_path, &file_name)?;
 
     let use_source = resolve_paper_source_path(&updated)?;
     let thumbnails_dir = state.app_dir.join("thumbnails");
@@ -817,13 +1140,13 @@ fn generate_thumbnail_file(managed_path: &Path, paper_id: &str, thumbnails_dir: 
 
 fn resolve_paper_source_path(paper: &Paper) -> Result<PathBuf, String> {
     if !paper.managed_path.trim().is_empty() && !paper.managed_path.starts_with("reference://") {
-        let managed = PathBuf::from(&paper.managed_path);
+        let managed = PathBuf::from(normalize_user_path(&paper.managed_path));
         if managed.exists() {
             return Ok(managed);
         }
     }
     if !paper.original_path.trim().is_empty() {
-        let original = PathBuf::from(&paper.original_path);
+        let original = PathBuf::from(normalize_user_path(&paper.original_path));
         if original.exists() {
             return Ok(original);
         }

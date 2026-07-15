@@ -229,7 +229,7 @@ export function Sidebar(props: SidebarProps) {
           <Settings className="h-4 w-4" />
           <span>设置</span>
         </button>
-        <div className="px-1 text-[11px]">v0.2.0</div>
+        <div className="px-1 text-[11px]">v0.3.0</div>
         <div className="mt-1 px-1 text-[11px]">Designed &amp; Developed by TreasureU</div>
       </div>
       {confirmDeleteCategory && (
