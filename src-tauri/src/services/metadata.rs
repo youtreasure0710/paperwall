@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use regex::Regex;
 
 use crate::services::classifier::classify;
@@ -122,9 +123,22 @@ fn extract_abstract(text: &str) -> Option<String> {
 
 fn extract_year(text: &str) -> Option<i32> {
     let re = Regex::new(r"(19|20)\d{2}").ok()?;
-    re.find(text)
-        .and_then(|m| m.as_str().parse::<i32>().ok())
+    let current_year = chrono::Utc::now().year();
+    let max_reasonable_year = current_year + 1;
+    let years: Vec<i32> = re
+        .find_iter(text)
+        .filter_map(|m| m.as_str().parse::<i32>().ok())
         .filter(|year| (1900..=2100).contains(year))
+        .collect();
+    if years.is_empty() {
+        return None;
+    }
+    years
+        .iter()
+        .copied()
+        .filter(|year| (1990..=max_reasonable_year).contains(year))
+        .max()
+        .or_else(|| years.first().copied())
 }
 
 fn extract_arxiv(text: &str) -> Option<String> {

@@ -27,10 +27,10 @@ export class LocalErrorBoundary extends React.Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return this.props.fallback ?? (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-900/20">
-          <div className="rounded border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
+        <div className="pw-overlay-scrim absolute inset-0 z-40 flex items-center justify-center">
+          <div className="pw-dialog-surface max-w-md px-4 py-3 text-sm text-[var(--text-secondary)]">
             阅读面板发生错误，已隔离，不影响主界面。
-            {this.state.message ? <div className="mt-1 text-xs text-slate-500">{this.state.message}</div> : null}
+            {this.state.message ? <div className="mt-1 text-xs text-[var(--text-tertiary)]">{this.state.message}</div> : null}
           </div>
         </div>
       );

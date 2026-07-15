@@ -51,6 +51,7 @@ export interface Paper {
 export interface PaperFilters {
   query: string;
   category: string;
+  tag: string;
   readStatus: 'all' | ReadStatus;
   onlyFavorite: boolean;
   year?: number;

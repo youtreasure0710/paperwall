@@ -41,7 +41,10 @@ pub struct Paper {
 impl Paper {
     pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let authors_json: String = row.get("authors")?;
-        let tags_json: String = row.get("tags")?;
+        let tags_json: String = match row.as_ref().column_index("resolved_tags") {
+            Ok(idx) => row.get::<_, String>(idx).unwrap_or_else(|_| "[]".to_string()),
+            Err(_) => row.get("tags")?,
+        };
         let notes: String = row.get("notes")?;
         let has_notes = match row.as_ref().column_index("has_notes") {
             Ok(idx) => row.get::<_, i64>(idx).unwrap_or(0) == 1,

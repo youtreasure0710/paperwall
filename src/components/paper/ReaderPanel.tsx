@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { resolvePaperFilePath } from '@/lib/paperPath';
 import { toPdfSrc } from '@/services/pdf';
 import type { CreateNoteInput, NoteItem } from '@/types/note';
 import type { Paper } from '@/types/paper';
@@ -16,6 +17,7 @@ interface ReaderPanelProps {
   open: boolean;
   paper?: Paper;
   notes: NoteItem[];
+  autoResumeReading: boolean;
   focusTarget?: {
     token: number;
     page?: number;
@@ -26,6 +28,7 @@ interface ReaderPanelProps {
   onCreateNote: (note: CreateNoteInput) => Promise<void>;
   onDeleteNote: (id: string) => Promise<void>;
   onUpdateHighlightColor: (id: string, color: HighlightColor) => Promise<void>;
+  onUpdateHighlightRemark: (id: string, remark: string) => Promise<void>;
 }
 
 type HighlightColor = 'yellow' | 'blue' | 'red';
@@ -75,11 +78,34 @@ function readerGroupTitle(key: ReaderNoteGroupKey) {
 }
 
 function readerGroupAccent(key: ReaderNoteGroupKey) {
-  if (key === 'yellow') return 'border-amber-300 bg-amber-50/70';
-  if (key === 'blue') return 'border-blue-300 bg-blue-50/70';
-  if (key === 'red') return 'border-rose-300 bg-rose-50/70';
-  if (key === 'note') return 'border-slate-300 bg-slate-50';
-  return 'border-emerald-300 bg-emerald-50/70';
+  if (key === 'yellow') return 'border-[rgba(255,214,102,0.5)] pw-hl-yellow-soft';
+  if (key === 'blue') return 'border-[rgba(120,160,255,0.45)] pw-hl-blue-soft';
+  if (key === 'red') return 'border-[rgba(255,130,130,0.45)] pw-hl-red-soft';
+  if (key === 'note') return 'border-[var(--border-default)] bg-[var(--bg-surface-secondary)]';
+  return 'border-[rgba(110,198,153,0.45)] bg-[rgba(110,198,153,0.12)]';
+}
+
+function readerItemAccent(key: ReaderNoteGroupKey) {
+  if (key === 'yellow') return 'border-l-4 border-[rgba(255,214,102,0.8)] pw-hl-yellow-soft';
+  if (key === 'blue') return 'border-l-4 border-[rgba(120,160,255,0.75)] pw-hl-blue-soft';
+  if (key === 'red') return 'border-l-4 border-[rgba(255,130,130,0.75)] pw-hl-red-soft';
+  if (key === 'note') return 'border-l-4 border-[var(--border-strong)] bg-[var(--bg-surface-secondary)]';
+  return 'border-l-4 border-[rgba(110,198,153,0.95)] bg-[rgba(110,198,153,0.12)]';
+}
+
+function readerItemActiveAccent(key: ReaderNoteGroupKey) {
+  if (key === 'yellow') return 'ring-1 ring-[rgba(255,214,102,0.9)]';
+  if (key === 'blue') return 'ring-1 ring-[rgba(120,160,255,0.9)]';
+  if (key === 'red') return 'ring-1 ring-[rgba(255,130,130,0.9)]';
+  if (key === 'note') return 'ring-1 ring-[var(--border-strong)]';
+  return 'ring-1 ring-[rgba(110,198,153,0.9)]';
+}
+
+function readerItemBorderTone(key: ReaderNoteGroupKey) {
+  if (key === 'yellow') return 'border-[rgba(255,214,102,0.55)]';
+  if (key === 'blue') return 'border-[rgba(120,160,255,0.5)]';
+  if (key === 'red') return 'border-[rgba(255,130,130,0.5)]';
+  return 'border-[var(--border-default)]';
 }
 
 function round4(value: number) {
@@ -106,9 +132,89 @@ function dedupeNormalizedRects(rects: PersistedRect[]): PersistedRect[] {
   });
 }
 
+function mergeNormalizedRectsByLine(rects: PersistedRect[]): PersistedRect[] {
+  if (rects.length <= 1) return rects;
+  const sorted = [...rects].sort((a, b) => {
+    if (Math.abs(a.top - b.top) > 0.002) return a.top - b.top;
+    return a.left - b.left;
+  });
+
+  const avgHeight = sorted.reduce((sum, item) => sum + item.height, 0) / sorted.length;
+  const rowTolerance = Math.max(0.0025, Math.min(0.02, avgHeight * 0.6));
+  const gapTolerance = Math.max(0.0035, Math.min(0.015, avgHeight * 0.75));
+
+  const rows: PersistedRect[][] = [];
+  for (const rect of sorted) {
+    const centerY = rect.top + rect.height / 2;
+    let matchedRow: PersistedRect[] | null = null;
+    for (const row of rows) {
+      const ref = row[0];
+      const refCenter = ref.top + ref.height / 2;
+      if (Math.abs(centerY - refCenter) <= rowTolerance) {
+        matchedRow = row;
+        break;
+      }
+    }
+    if (!matchedRow) {
+      rows.push([rect]);
+    } else {
+      matchedRow.push(rect);
+    }
+  }
+
+  const merged: PersistedRect[] = [];
+  for (const row of rows) {
+    const line = [...row].sort((a, b) => a.left - b.left);
+    let current = { ...line[0] };
+    for (let i = 1; i < line.length; i += 1) {
+      const next = line[i];
+      const currentRight = current.left + current.width;
+      const nextRight = next.left + next.width;
+      const gap = next.left - currentRight;
+      if (gap <= gapTolerance) {
+        const mergedLeft = Math.min(current.left, next.left);
+        const mergedTop = Math.min(current.top, next.top);
+        const mergedRight = Math.max(currentRight, nextRight);
+        const mergedBottom = Math.max(current.top + current.height, next.top + next.height);
+        current = {
+          left: mergedLeft,
+          top: mergedTop,
+          width: mergedRight - mergedLeft,
+          height: mergedBottom - mergedTop,
+        };
+      } else {
+        merged.push(current);
+        current = { ...next };
+      }
+    }
+    merged.push(current);
+  }
+
+  return merged.sort((a, b) => {
+    if (Math.abs(a.top - b.top) > 0.002) return a.top - b.top;
+    return a.left - b.left;
+  });
+}
+
+function normalizeRectsForPersist(rects: PersistedRect[]): PersistedRect[] {
+  return mergeNormalizedRectsByLine(dedupeNormalizedRects(rects));
+}
+
+function buildPageWindow(centerPage: number, totalPages: number): number[] {
+  if (totalPages <= 0) return [];
+  const center = Math.min(Math.max(centerPage, 1), totalPages);
+  const start = center <= 1 ? 1 : Math.max(1, center - 1);
+  const end = center <= 1 ? Math.min(2, totalPages) : Math.min(totalPages, center + 1);
+  const pages: number[] = [];
+  for (let page = start; page <= end; page += 1) pages.push(page);
+  return pages;
+}
+
 export function ReaderPanel(props: ReaderPanelProps) {
   const { open, paper } = props;
   const currentPaper = paper ?? null;
+  const [showShell, setShowShell] = useState(open);
+  const [panelVisible, setPanelVisible] = useState(false);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1.1);
@@ -123,14 +229,17 @@ export function ReaderPanel(props: ReaderPanelProps) {
     color: HighlightColor;
     x: number;
     y: number;
+    remark?: string;
   } | null>(null);
+  const [highlightRemarkDraft, setHighlightRemarkDraft] = useState('');
+  const [inlineRemarkEditor, setInlineRemarkEditor] = useState<{ noteId: string; draft: string } | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<ReaderNoteGroupKey, boolean>>({
     yellow: false,
     blue: false,
     red: false,
     note: false,
-    excerpt: true,
+    excerpt: false,
   });
   const [readerToastText, setReaderToastText] = useState('');
   const [readerToastVisible, setReaderToastVisible] = useState(false);
@@ -141,6 +250,17 @@ export function ReaderPanel(props: ReaderPanelProps) {
   const didAutoScrollRef = useRef(false);
   const [pageWidth, setPageWidth] = useState(760);
   const [pageRenderTick, setPageRenderTick] = useState(0);
+  const [activePages, setActivePages] = useState<Set<number>>(() => new Set([1, 2]));
+  const pageHeightCacheRef = useRef<Map<number, number>>(new Map());
+  const [fallbackPageHeight, setFallbackPageHeight] = useState<number>(Math.round(760 * 1.414));
+  const latestPageRef = useRef(1);
+  const latestPaperRef = useRef<Paper | null>(null);
+  const wasOpenRef = useRef(false);
+  const initStateRef = useRef<{ open: boolean; paperId?: string; focusToken?: number }>({
+    open: false,
+    paperId: undefined,
+    focusToken: undefined,
+  });
 
   useEffect(() => {
     console.info('[ReaderPanel] worker initialized', {
@@ -150,19 +270,90 @@ export function ReaderPanel(props: ReaderPanelProps) {
 
   useEffect(() => {
     if (!paper) return;
-    setCurrentPage(paper.last_read_page && paper.last_read_page > 0 ? paper.last_read_page : 1);
+    setCurrentPage(props.autoResumeReading && paper.last_read_page && paper.last_read_page > 0 ? paper.last_read_page : 1);
     setSelectedText('');
     setComment('');
     setLoadError('');
     setSelectionMenu(null);
     setHighlightMenu(null);
+    setHighlightRemarkDraft('');
+    setInlineRemarkEditor(null);
+    setCollapsedGroups({
+      yellow: false,
+      blue: false,
+      red: false,
+      note: false,
+      excerpt: false,
+    });
     setActiveNoteId(null);
     setPersistedHighlights([]);
     setNumPages(0);
     setPageRenderTick(0);
+    setActivePages(new Set([1, 2]));
+    pageHeightCacheRef.current.clear();
+    setFallbackPageHeight(Math.round(760 * 1.414));
     didAutoScrollRef.current = false;
     pageElementsRef.current.clear();
-  }, [paper?.id]);
+  }, [paper?.id, props.autoResumeReading]);
+
+  useEffect(() => {
+    if (open) {
+      setShowShell(true);
+      setPanelVisible(false);
+      const t = window.setTimeout(() => {
+        setPanelVisible(true);
+      }, 60);
+      return () => window.clearTimeout(t);
+    }
+    setPanelVisible(false);
+    setShowShell(false);
+    return undefined;
+  }, [open]);
+
+  useEffect(() => {
+    const focusToken = props.focusTarget?.token;
+    const focusPage = props.focusTarget?.page;
+    if (!open || !paper) {
+      initStateRef.current = { open, paperId: paper?.id, focusToken };
+      return;
+    }
+    const becameOpen = open && !initStateRef.current.open;
+    const paperChanged = initStateRef.current.paperId !== paper.id;
+    const focusChanged = typeof focusToken === 'number' && focusToken !== initStateRef.current.focusToken;
+    if (becameOpen || paperChanged || focusChanged) {
+      const targetPage =
+        focusPage && focusPage > 0
+          ? focusPage
+          : props.autoResumeReading && paper.last_read_page && paper.last_read_page > 0
+            ? paper.last_read_page
+            : 1;
+      setCurrentPage(targetPage);
+      didAutoScrollRef.current = false;
+      focusAppliedTokenRef.current = null;
+      setSelectionMenu(null);
+      setHighlightMenu(null);
+      setHighlightRemarkDraft('');
+      setInlineRemarkEditor(null);
+      setActiveNoteId(null);
+    }
+    initStateRef.current = { open, paperId: paper.id, focusToken };
+  }, [open, paper?.id, props.focusTarget?.token, props.focusTarget?.page, props.autoResumeReading]);
+
+  useEffect(() => {
+    latestPageRef.current = currentPage;
+    latestPaperRef.current = currentPaper;
+  }, [currentPage, currentPaper]);
+
+  useEffect(() => {
+    if (!open && wasOpenRef.current) {
+      const paperToFlush = latestPaperRef.current;
+      const pageToFlush = latestPageRef.current;
+      if (paperToFlush && pageToFlush > 0) {
+        void props.onProgress(paperToFlush, pageToFlush);
+      }
+    }
+    wasOpenRef.current = open;
+  }, [open, props.onProgress]);
 
   useEffect(() => {
     if (!currentPaper) {
@@ -198,7 +389,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
             width: Math.max(0, Math.min(1, rect.width)),
             height: Math.max(0, Math.min(1, rect.height)),
           }));
-        const normalizedRects = dedupeNormalizedRects(rects);
+        const normalizedRects = normalizeRectsForPersist(rects);
         if (normalizedRects.length === 0) continue;
         next.push({
           id: item.id,
@@ -215,13 +406,13 @@ export function ReaderPanel(props: ReaderPanelProps) {
 
   const pdfSrc = useMemo(() => {
     if (!currentPaper) return '';
-    const sourcePath = currentPaper.managed_path || currentPaper.original_path;
+    const sourcePath = resolvePaperFilePath(currentPaper);
     return sourcePath ? toPdfSrc(sourcePath) : '';
   }, [currentPaper?.managed_path, currentPaper?.original_path, currentPaper?.id]);
 
   useEffect(() => {
     if (!open || !currentPaper) return;
-    const sourcePath = currentPaper.managed_path || currentPaper.original_path || '';
+    const sourcePath = resolvePaperFilePath(currentPaper);
     const sourceUrl = pdfSrc;
     setLoadError('');
 
@@ -255,7 +446,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
   );
   const documentKey = useMemo(() => {
     if (!currentPaper) return 'empty';
-    const sourcePath = currentPaper.managed_path || currentPaper.original_path || '';
+    const sourcePath = resolvePaperFilePath(currentPaper);
     return `${currentPaper.id}:${sourcePath}`;
   }, [currentPaper?.id, currentPaper?.managed_path, currentPaper?.original_path]);
   const pageNumbers = useMemo(() => Array.from({ length: numPages }, (_, index) => index + 1), [numPages]);
@@ -273,6 +464,11 @@ export function ReaderPanel(props: ReaderPanelProps) {
     for (const item of persistedHighlights) map.set(item.id, item);
     return map;
   }, [persistedHighlights]);
+  const notesMap = useMemo(() => {
+    const map = new Map<string, NoteItem>();
+    for (const item of props.notes) map.set(item.id, item);
+    return map;
+  }, [props.notes]);
   const groupedReaderNotes = useMemo(() => {
     const groups: Record<ReaderNoteGroupKey, ReaderNoteItemView[]> = {
       yellow: [],
@@ -305,10 +501,13 @@ export function ReaderPanel(props: ReaderPanelProps) {
         const meta = parseHighlightPayload(item.comment);
         if (meta?.kind === 'highlight' && (meta.color === 'yellow' || meta.color === 'blue' || meta.color === 'red')) {
           const persisted = persistedHighlightMap.get(item.id);
+          const selectedRaw = (item.selected_text || '').trim();
+          const remarkRaw = (item.content || '').trim();
           groups[meta.color].push({
             id: item.id,
             page: item.page_number ?? null,
-            text,
+            text: selectedRaw || text,
+            comment: remarkRaw && (!selectedRaw || remarkRaw !== selectedRaw) ? remarkRaw : undefined,
             highlightTop: persisted?.rects?.[0]?.top,
           });
           continue;
@@ -319,19 +518,16 @@ export function ReaderPanel(props: ReaderPanelProps) {
       groups[key].sort((a, b) => {
         const pa = a.page ?? 10_000;
         const pb = b.page ?? 10_000;
-        const da = Math.abs(pa - currentPage);
-        const db = Math.abs(pb - currentPage);
-        if (da !== db) return da - db;
-        return pa - pb;
+        if (pa !== pb) return pa - pb;
+        const ta = a.highlightTop ?? 10_000;
+        const tb = b.highlightTop ?? 10_000;
+        if (ta !== tb) return ta - tb;
+        return a.id.localeCompare(b.id);
       });
     }
     return groups;
-  }, [props.notes, persistedHighlightMap, currentPage]);
-  const orderedGroups = useMemo(() => {
-    const withCurrent = readerNoteGroupOrder.filter((key) => groupedReaderNotes[key].some((item) => item.page === currentPage));
-    const rest = readerNoteGroupOrder.filter((key) => !withCurrent.includes(key));
-    return [...withCurrent, ...rest];
-  }, [groupedReaderNotes, currentPage]);
+  }, [props.notes, persistedHighlightMap]);
+  const orderedGroups = readerNoteGroupOrder;
 
   useEffect(() => {
     function updateWidth() {
@@ -379,7 +575,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
     didAutoScrollRef.current = true;
     const container = containerRef.current;
     if (container) updateCurrentPageFromScroll();
-  }, [open, currentPaper, numPages, currentPage, updateCurrentPageFromScroll]);
+  }, [open, currentPaper, numPages, currentPage, updateCurrentPageFromScroll, pageRenderTick]);
 
   useEffect(() => {
     if (!open || !props.focusTarget || !currentPaper) return;
@@ -389,6 +585,23 @@ export function ReaderPanel(props: ReaderPanelProps) {
       setCurrentPage(props.focusTarget.page);
     }
   }, [open, props.focusTarget?.token, currentPaper?.id]);
+
+  useEffect(() => {
+    if (!open || !currentPaper || numPages <= 0) return;
+    const windowPages = buildPageWindow(currentPage, numPages);
+    if (windowPages.length === 0) return;
+    setActivePages((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const page of windowPages) {
+        if (!next.has(page)) {
+          next.add(page);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [open, currentPaper?.id, numPages, currentPage]);
 
   const jumpToNoteTarget = useCallback((target: { page?: number; noteId?: string }) => {
     if (!open) return false;
@@ -547,12 +760,15 @@ export function ReaderPanel(props: ReaderPanelProps) {
             && normalizedY >= rect.top
             && normalizedY <= rect.top + rect.height;
           if (hit) {
+            const remark = (notesMap.get(item.id)?.content || '').trim();
             setHighlightMenu({
               noteId: item.id,
               color: item.color,
               x: clientX,
               y: clientY - 8,
+              remark,
             });
+            setHighlightRemarkDraft(remark);
             setActiveNoteId(item.id);
             return true;
           }
@@ -561,7 +777,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
       return false;
     }
     return false;
-  }, [persistedHighlightsByPage]);
+  }, [persistedHighlightsByPage, notesMap]);
 
   async function addSelectedAs(type: 'excerpt' | 'note') {
     if (!currentPaper) return;
@@ -643,7 +859,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
         id: `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         color,
         pageNumber,
-        rects: dedupeNormalizedRects(itemRects),
+        rects: normalizeRectsForPersist(itemRects),
       }))
       .filter((item) => item.rects.length > 0);
     if (created.length === 0) return;
@@ -656,7 +872,7 @@ export function ReaderPanel(props: ReaderPanelProps) {
           props.onCreateNote({
             paper_id: currentPaper.id,
             note_type: 'annotation',
-            content: text,
+            content: '',
             selected_text: text,
             page_number: item.pageNumber,
             comment: JSON.stringify({
@@ -690,6 +906,35 @@ export function ReaderPanel(props: ReaderPanelProps) {
     } catch (err) {
       setPersistedHighlights(before);
       showReaderToast(`修改失败：${String(err)}`);
+    }
+  }
+
+  async function saveHighlightRemark(noteId: string) {
+    try {
+      await props.onUpdateHighlightRemark(noteId, highlightRemarkDraft.trim());
+      showReaderToast(highlightRemarkDraft.trim() ? '高亮备注已保存' : '高亮备注已清空');
+      setHighlightMenu((prev) => (prev ? { ...prev, remark: highlightRemarkDraft.trim() } : prev));
+    } catch (err) {
+      showReaderToast(`备注保存失败：${String(err)}`);
+    }
+  }
+
+  function openInlineRemarkEditor(noteId: string, initialRemark?: string) {
+    setInlineRemarkEditor({
+      noteId,
+      draft: initialRemark?.trim() || '',
+    });
+  }
+
+  async function saveInlineHighlightRemark() {
+    if (!inlineRemarkEditor) return;
+    try {
+      const nextRemark = inlineRemarkEditor.draft.trim();
+      await props.onUpdateHighlightRemark(inlineRemarkEditor.noteId, nextRemark);
+      showReaderToast(nextRemark ? '高亮备注已保存' : '高亮备注已清空');
+      setInlineRemarkEditor(null);
+    } catch (err) {
+      showReaderToast(`备注保存失败：${String(err)}`);
     }
   }
 
@@ -748,6 +993,13 @@ export function ReaderPanel(props: ReaderPanelProps) {
 
   const handlePageRenderSuccess = useCallback((pageNumber: number) => {
     if (!currentPaper) return;
+    const pageEl = pageElementsRef.current.get(pageNumber);
+    const measuredHeight = pageEl?.getBoundingClientRect().height;
+    if (measuredHeight && measuredHeight > 0) {
+      const rounded = Math.round(measuredHeight);
+      pageHeightCacheRef.current.set(pageNumber, rounded);
+      setFallbackPageHeight((prev) => (prev > 0 ? prev : rounded));
+    }
     setPageRenderTick((prev) => prev + 1);
     console.info('[ReaderPanel] page render success', {
       paperId: currentPaper.id,
@@ -768,18 +1020,29 @@ export function ReaderPanel(props: ReaderPanelProps) {
     });
   }, [currentPaper, scale, pageWidth]);
 
-  if (!open || !currentPaper) return null;
+  const getPlaceholderHeight = useCallback(
+    (pageNumber: number) => pageHeightCacheRef.current.get(pageNumber) ?? fallbackPageHeight,
+    [fallbackPageHeight]
+  );
+
+  if (!currentPaper || (!open && !showShell)) return null;
 
   return (
-    <div className="absolute inset-0 z-40 flex bg-slate-900/20 backdrop-blur-[1px]">
+    <div
+      className={`pw-reader-overlay absolute inset-0 z-40 flex bg-black/16 backdrop-blur-[1px] transition-opacity duration-[var(--motion-slow)] ease-in-out motion-reduce:transition-none ${
+        panelVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+      }`}
+    >
       <div
-        className="relative ml-8 mt-8 flex h-[calc(100vh-4rem)] w-[calc(100vw-8rem)] flex-col rounded-lg border border-slate-200 bg-white shadow-2xl transition-all duration-200"
+        className={`pw-reader-panel relative ml-8 mt-8 flex h-[calc(100vh-4rem)] w-[calc(100vw-8rem)] flex-col rounded-xl border border-[var(--border-default)] bg-[var(--reader-panel)] shadow-[var(--shadow-overlay)] transition-opacity duration-[var(--motion-slow)] ease-in-out motion-reduce:transition-none ${
+          panelVisible ? 'opacity-100' : 'opacity-0'
+        }`}
       >
-        <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
-          <div className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">阅读全文：{currentPaper.title || currentPaper.file_name}</div>
-          <span className="text-xs text-slate-600">当前页 {currentPage} / {numPages || '-'}</span>
+        <div className="flex items-center gap-2 border-b border-[var(--border-default)]/85 bg-[var(--bg-surface)]/66 px-3 py-2.5 backdrop-blur-sm">
+          <div className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--text-primary)]">阅读全文：{currentPaper.title || currentPaper.file_name}</div>
+          <span className="text-xs text-[var(--text-secondary)]">当前页 {currentPage} / {numPages || '-'}</span>
           <Button size="sm" variant="secondary" onClick={() => setScale((v) => Math.max(0.7, Number((v - 0.1).toFixed(2))))}>-</Button>
-          <span className="text-xs text-slate-600">{Math.round(scale * 100)}%</span>
+          <span className="text-xs text-[var(--text-secondary)]">{Math.round(scale * 100)}%</span>
           <Button size="sm" variant="secondary" onClick={() => setScale((v) => Math.min(2.2, Number((v + 0.1).toFixed(2))))}>+</Button>
           <Button
             size="sm"
@@ -792,10 +1055,16 @@ export function ReaderPanel(props: ReaderPanelProps) {
           <Button size="sm" variant="ghost" onClick={props.onClose}>关闭</Button>
         </div>
 
-        <div className="grid min-h-0 flex-1 grid-cols-[1fr_280px]">
+        <div
+          className={`grid min-h-0 flex-1 transition-[grid-template-columns] duration-300 ease-out motion-reduce:transition-none ${
+            isWindowFullscreen
+              ? 'grid-cols-[minmax(0,1fr)_360px]'
+              : 'grid-cols-[minmax(0,1fr)_280px]'
+          }`}
+        >
           <div
             ref={containerRef}
-            className="relative min-h-0 overflow-auto bg-slate-100 p-4"
+            className="relative min-h-0 overflow-auto bg-[var(--reader-bg)] p-5"
             onMouseDown={() => setHighlightMenu(null)}
             onMouseUp={captureSelectedText}
             onClick={(e) => {
@@ -805,15 +1074,17 @@ export function ReaderPanel(props: ReaderPanelProps) {
             }}
             onKeyUp={captureSelectedText}
           >
-            <div className="relative mx-auto w-fit rounded border border-slate-300 bg-white p-2 shadow-sm">
+            <div className="relative mx-auto w-fit rounded-xl border border-[var(--border-default)]/85 bg-[var(--bg-surface)] p-2.5 shadow-[var(--shadow-sm)]">
               {documentFile ? (
                 <ReaderDocumentView
                   documentKey={documentKey}
                   documentFile={documentFile}
                   documentOptions={documentOptions}
                   pageNumbers={pageNumbers}
+                  activePages={activePages}
                   pageWidth={pageWidth}
                   scale={scale}
+                  getPlaceholderHeight={getPlaceholderHeight}
                   loadError={loadError}
                   persistedHighlightsByPage={persistedHighlightsByPage}
                   onBindPageElement={bindPageElement}
@@ -823,67 +1094,106 @@ export function ReaderPanel(props: ReaderPanelProps) {
                   onPageRenderError={handlePageRenderError}
                 />
               ) : (
-                <div className="p-6 text-sm text-slate-500">正在准备 PDF 文件...</div>
+                <div className="p-6 text-sm text-[var(--text-secondary)]">正在准备 PDF 文件...</div>
               )}
             </div>
           </div>
 
-          <aside className="flex min-h-0 flex-col border-l border-slate-200 bg-white p-3">
-            <h3 className="mb-2 text-sm font-semibold text-slate-900">选中文本摘录</h3>
-            <div className="mb-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+          <aside className={`flex min-h-0 flex-col border-l border-[var(--border-default)] bg-[var(--reader-side)] p-3.5 ${isWindowFullscreen ? 'w-[360px]' : 'w-[280px]'}`}>
+            <h3 className="mb-2 text-sm font-semibold text-[var(--text-primary)]">选中文本摘录</h3>
+            <div className="mb-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface)] p-2.5 text-xs text-[var(--text-secondary)]">
               {selectedText || '在左侧 PDF 中选中文字后，这里会显示内容'}
             </div>
-            <Input
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              placeholder="备注（可选）"
-              className="mb-2"
-            />
             <div className="mb-2 flex gap-2">
               <Button size="sm" variant="secondary" disabled={!selectedText.trim()} onClick={() => void addSelectedAs('excerpt')}>添加为摘录</Button>
               <Button size="sm" disabled={!selectedText.trim()} onClick={() => void addSelectedAs('note')}>添加到笔记</Button>
             </div>
-            <p className="mb-3 text-xs text-slate-500">当前页：{currentPage}</p>
 
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-slate-200 bg-slate-50/50 p-2">
-              <h4 className="mb-2 text-xs font-semibold text-slate-700">当前论文标注总览</h4>
-              <div className="space-y-2">
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface)]/82 p-2.5">
+              <h4 className="mb-2 text-[11px] font-medium tracking-[0.08em] text-[var(--text-tertiary)]">当前论文标注总览</h4>
+              <div className="space-y-3">
                 {orderedGroups.map((groupKey) => {
                   const items = groupedReaderNotes[groupKey];
                   if (items.length === 0) return null;
                   const collapsed = collapsedGroups[groupKey];
                   return (
-                    <div key={groupKey} className={`rounded-md border p-2 ${readerGroupAccent(groupKey)}`}>
+                    <div key={groupKey} className={`rounded-lg border p-2.5 ${readerGroupAccent(groupKey)}`}>
                       <button
-                        className="mb-1 flex w-full items-center justify-between"
+                        className="mb-2 flex w-full items-center justify-between"
                         onClick={() => setCollapsedGroups((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }))}
                       >
-                        <span className="text-xs font-semibold text-slate-700">{readerGroupTitle(groupKey)}</span>
-                        <span className="rounded bg-white/70 px-1.5 py-0.5 text-[10px] text-slate-600">{collapsed ? '+' : '-'} {items.length}</span>
+                        <span className="text-xs font-semibold text-[var(--text-secondary)]">{readerGroupTitle(groupKey)}</span>
+                        <span className="rounded border border-[var(--border-default)] bg-[var(--bg-surface)]/90 px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">
+                          {collapsed ? '+' : '-'} {items.length}
+                        </span>
                       </button>
-                      {!collapsed ? (
-                        <div className="space-y-1.5">
-                          {items.slice(0, 10).map((item) => (
-                            <button
+                      <div className={`overflow-hidden transition-[max-height,opacity] duration-320 ease-out motion-reduce:transition-none ${collapsed ? 'max-h-0 opacity-0' : 'max-h-[640px] opacity-100'}`}>
+                      <div className="space-y-2">
+                        {items.map((item) => {
+                          const isHighlightGroup = groupKey === 'yellow' || groupKey === 'blue' || groupKey === 'red';
+                          const isEditingRemark = inlineRemarkEditor?.noteId === item.id;
+                          const itemComment = item.comment?.trim() || '';
+                          return (
+                            <div
                               key={item.id}
-                              className={`w-full rounded border border-white/70 bg-white/70 p-1.5 text-left ${activeNoteId === item.id ? 'ring-1 ring-blue-400' : ''}`}
-                              onClick={() => jumpToNoteTarget({ page: item.page ?? undefined, noteId: item.id })}
+                              className={`rounded-md border bg-[var(--bg-surface)] p-2.5 text-left ${readerItemBorderTone(groupKey)} ${readerItemAccent(groupKey)} ${activeNoteId === item.id ? readerItemActiveAccent(groupKey) : ''}`}
                             >
-                            <div className="mb-1 text-[10px] text-slate-500">第 {item.page ?? '-'} 页</div>
-                            <div className="line-clamp-3 text-[11px] text-slate-700">{item.text || '（无内容）'}</div>
-                            {item.comment ? <div className="mt-1 line-clamp-2 text-[10px] text-slate-500">备注：{item.comment}</div> : null}
-                            </button>
-                          ))}
-                        {items.length > 10 ? (
-                          <div className="text-[10px] text-slate-500">还有 {items.length - 10} 条，滚动可查看更多</div>
-                        ) : null}
-                        </div>
-                      ) : null}
+                              <button
+                                className="w-full appearance-none border-0 bg-transparent p-0 text-left focus:outline-none"
+                                onClick={() => jumpToNoteTarget({ page: item.page ?? undefined, noteId: item.id })}
+                              >
+                                <div className="mb-1 text-[10px] text-[var(--text-tertiary)]">第 {item.page ?? '-'} 页</div>
+                                <div className="text-xs leading-5 text-[var(--text-primary)]">{item.text || '（无内容）'}</div>
+                                {itemComment ? <div className="mt-1 text-[11px] text-[var(--text-secondary)]">备注：{itemComment}</div> : null}
+                              </button>
+                              {isHighlightGroup ? (
+                                <div className="mt-1.5">
+                                  {isEditingRemark ? (
+                                    <div className="flex items-center gap-1">
+                                      <Input
+                                        value={inlineRemarkEditor.draft}
+                                        onChange={(e) =>
+                                          setInlineRemarkEditor((prev) =>
+                                            prev && prev.noteId === item.id
+                                              ? { ...prev, draft: e.target.value }
+                                              : prev,
+                                          )
+                                        }
+                                        placeholder="输入高亮备注"
+                                        className="h-7 text-[11px]"
+                                      />
+                                      <Button size="sm" className="h-7 px-2 text-[11px]" onClick={() => void saveInlineHighlightRemark()}>
+                                        保存
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        className="h-7 px-2 text-[11px]"
+                                        onClick={() => setInlineRemarkEditor(null)}
+                                      >
+                                        取消
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      className="text-[10px] text-[var(--accent-text)] hover:underline"
+                                      onClick={() => openInlineRemarkEditor(item.id, itemComment)}
+                                    >
+                                      {itemComment ? '编辑备注' : '添加备注'}
+                                    </button>
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      </div>
                     </div>
                   );
                 })}
                 {readerNoteGroupOrder.every((key) => groupedReaderNotes[key].length === 0) ? (
-                  <p className="text-xs text-slate-500">暂无高亮/笔记/摘要记录。</p>
+                  <p className="text-xs text-[var(--text-tertiary)]">暂无高亮/笔记/摘要记录。</p>
                 ) : null}
               </div>
             </div>
@@ -891,47 +1201,47 @@ export function ReaderPanel(props: ReaderPanelProps) {
         </div>
         {selectionMenu && selectedText.trim() ? (
           <div
-            className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded-xl border border-slate-200/80 bg-white/90 p-1.5 shadow-lg backdrop-blur-sm transition-all duration-150"
+            className="ui-pop pw-popover-surface pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full p-1.5 transition-all duration-[var(--motion-base)] ease-out motion-reduce:transition-none"
             style={{ left: selectionMenu.x, top: selectionMenu.y }}
           >
             <div className="pointer-events-auto flex items-center gap-1">
               <button
-                className="rounded-md bg-amber-200 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-300"
+                className="rounded-md border border-[rgba(255,214,102,0.55)] pw-hl-yellow-soft px-2 py-1 text-[11px] text-[var(--text-primary)] hover:brightness-[0.98]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void triggerHighlight('yellow')}
               >
                 黄色高亮
               </button>
               <button
-                className="rounded-md bg-blue-200 px-2 py-1 text-[11px] text-blue-900 hover:bg-blue-300"
+                className="rounded-md border border-[rgba(120,160,255,0.55)] pw-hl-blue-soft px-2 py-1 text-[11px] text-[var(--text-primary)] hover:brightness-[0.98]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void triggerHighlight('blue')}
               >
                 蓝色高亮
               </button>
               <button
-                className="rounded-md bg-rose-200 px-2 py-1 text-[11px] text-rose-900 hover:bg-rose-300"
+                className="rounded-md border border-[rgba(255,130,130,0.55)] pw-hl-red-soft px-2 py-1 text-[11px] text-[var(--text-primary)] hover:brightness-[0.98]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void triggerHighlight('red')}
               >
                 红色高亮
               </button>
               <button
-                className="rounded-md border border-slate-200 px-2 py-1 text-[11px] hover:bg-slate-50"
+                className="pw-menu-item rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void addSelectedAs('note')}
               >
                 添加到笔记
               </button>
               <button
-                className="rounded-md border border-slate-200 px-2 py-1 text-[11px] hover:bg-slate-50"
+                className="pw-menu-item rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void addSelectedAs('excerpt')}
               >
                 添加为摘录
               </button>
               <button
-                className="rounded-md border border-slate-200 px-2 py-1 text-[11px] hover:bg-slate-50"
+                className="pw-menu-item rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px]"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void copySelectedText()}
               >
@@ -945,19 +1255,30 @@ export function ReaderPanel(props: ReaderPanelProps) {
         ) : null}
         {highlightMenu ? (
           <div
-            className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full rounded-xl border border-slate-200/80 bg-white/95 p-1.5 shadow-lg backdrop-blur-sm"
+            className="ui-pop pw-popover-surface pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-full p-2 transition-[opacity,transform] duration-[var(--motion-base)] ease-out motion-reduce:transition-none"
             style={{ left: highlightMenu.x, top: highlightMenu.y }}
           >
             <div className="pointer-events-auto flex items-center gap-1">
-              <button className="rounded-md bg-amber-200 px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-300" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'yellow')}>黄</button>
-              <button className="rounded-md bg-blue-200 px-2 py-1 text-[11px] text-blue-900 hover:bg-blue-300" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'blue')}>蓝</button>
-              <button className="rounded-md bg-rose-200 px-2 py-1 text-[11px] text-rose-900 hover:bg-rose-300" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'red')}>红</button>
-              <button className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-red-600 hover:bg-red-50" onClick={() => void removeHighlight(highlightMenu.noteId)}>删除</button>
+              <button className="rounded-md border border-[rgba(255,214,102,0.55)] pw-hl-yellow-soft px-2 py-1 text-[11px] text-[var(--text-primary)]" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'yellow')}>黄</button>
+              <button className="rounded-md border border-[rgba(120,160,255,0.55)] pw-hl-blue-soft px-2 py-1 text-[11px] text-[var(--text-primary)]" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'blue')}>蓝</button>
+              <button className="rounded-md border border-[rgba(255,130,130,0.55)] pw-hl-red-soft px-2 py-1 text-[11px] text-[var(--text-primary)]" onClick={() => void updateHighlightColor(highlightMenu.noteId, 'red')}>红</button>
+              <button className="rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-red-600 transition-colors duration-[var(--motion-fast)] ease-out hover:bg-red-50/80 dark:hover:bg-red-900/20" onClick={() => void removeHighlight(highlightMenu.noteId)}>删除</button>
+            </div>
+            <div className="pointer-events-auto mt-1.5 flex items-center gap-1">
+              <Input
+                value={highlightRemarkDraft}
+                onChange={(e) => setHighlightRemarkDraft(e.target.value)}
+                placeholder="高亮备注（可选）"
+                className="h-7 w-52 text-xs"
+              />
+              <Button size="sm" className="h-7 px-2 text-[11px]" onClick={() => void saveHighlightRemark(highlightMenu.noteId)}>
+                保存
+              </Button>
             </div>
           </div>
         ) : null}
         <div
-          className={`pointer-events-none absolute right-4 top-12 z-40 rounded-md bg-slate-900/75 px-3 py-1.5 text-xs text-white transition-all duration-200 ${
+          className={`pw-toast pointer-events-none absolute right-4 top-12 z-40 px-3 py-1.5 text-xs transition-all duration-[var(--motion-slow)] ease-out motion-reduce:transition-none ${
             readerToastVisible ? 'opacity-100' : 'opacity-0'
           }`}
         >
@@ -978,8 +1299,10 @@ interface ReaderDocumentViewProps {
     stopAtErrors: boolean;
   };
   pageNumbers: number[];
+  activePages: Set<number>;
   pageWidth: number;
   scale: number;
+  getPlaceholderHeight: (pageNumber: number) => number;
   loadError: string;
   persistedHighlightsByPage: Map<number, PersistedHighlight[]>;
   onBindPageElement: (pageNumber: number, element: HTMLDivElement | null) => void;
@@ -995,8 +1318,10 @@ const ReaderDocumentView = memo(function ReaderDocumentView(props: ReaderDocumen
     documentFile,
     documentOptions,
     pageNumbers,
+    activePages,
     pageWidth,
     scale,
+    getPlaceholderHeight,
     loadError,
     persistedHighlightsByPage,
     onBindPageElement,
@@ -1012,53 +1337,62 @@ const ReaderDocumentView = memo(function ReaderDocumentView(props: ReaderDocumen
       file={documentFile}
       options={documentOptions}
       onLoadSuccess={({ numPages: total }) => onDocumentLoadSuccess(total)}
-      loading={<div className="p-6 text-sm text-slate-500">正在加载 PDF...</div>}
+      loading={<div className="p-6 text-sm text-[var(--text-secondary)]">正在加载 PDF...</div>}
       onLoadError={onDocumentLoadError}
       error={
         <div className="p-6 text-sm text-red-600">
           PDF 加载失败
-          {loadError ? <div className="mt-2 break-all text-xs text-slate-500">{loadError}</div> : null}
+          {loadError ? <div className="mt-2 break-all text-xs text-[var(--text-secondary)]">{loadError}</div> : null}
         </div>
       }
     >
       {pageNumbers.map((pageNumber) => (
-        <div key={pageNumber} className="mb-4 rounded border border-slate-200 bg-white p-2">
+        <div key={pageNumber} className="mb-4 rounded border border-[var(--border-default)] bg-[var(--bg-surface)] p-2">
           <div
             ref={(el) => onBindPageElement(pageNumber, el)}
             className="reader-page-layer relative [&_.react-pdf__Page__canvas]:relative [&_.react-pdf__Page__canvas]:z-0 [&_.react-pdf__Page__textContent]:relative [&_.react-pdf__Page__textContent]:z-20"
           >
-            <div className="pointer-events-none absolute inset-0 z-10">
-              {(persistedHighlightsByPage.get(pageNumber) || []).flatMap((item) =>
-                item.rects.map((rect, rectIdx) => (
-                  <div
-                    key={`${item.id}-${rectIdx}`}
-                    className={
-                      item.color === 'yellow'
-                        ? 'absolute rounded-sm bg-amber-300/40'
-                        : item.color === 'blue'
-                          ? 'absolute rounded-sm bg-sky-300/40'
-                          : 'absolute rounded-sm bg-rose-300/40'
-                    }
-                    style={{
-                      left: `${rect.left * 100}%`,
-                      top: `${rect.top * 100}%`,
-                      width: `${rect.width * 100}%`,
-                      height: `${rect.height * 100}%`,
-                    }}
-                  />
-                ))
-              )}
-            </div>
-            <Page
-              pageNumber={pageNumber}
-              width={Math.round(pageWidth * scale)}
-              renderAnnotationLayer={false}
-              renderTextLayer
-              onRenderSuccess={() => onPageRenderSuccess(pageNumber)}
-              onRenderError={(error) => onPageRenderError(pageNumber, error)}
-            />
+            {activePages.has(pageNumber) ? (
+              <>
+                <div className="pointer-events-none absolute inset-0 z-10">
+                  {(persistedHighlightsByPage.get(pageNumber) || []).flatMap((item) =>
+                    item.rects.map((rect, rectIdx) => (
+                      <div
+                        key={`${item.id}-${rectIdx}`}
+                        className={
+                          item.color === 'yellow'
+                            ? 'absolute rounded-sm pw-hl-yellow-fill'
+                            : item.color === 'blue'
+                              ? 'absolute rounded-sm pw-hl-blue-fill'
+                              : 'absolute rounded-sm pw-hl-red-fill'
+                        }
+                        style={{
+                          left: `${rect.left * 100}%`,
+                          top: `${rect.top * 100}%`,
+                          width: `${rect.width * 100}%`,
+                          height: `${rect.height * 100}%`,
+                        }}
+                      />
+                    ))
+                  )}
+                </div>
+                <Page
+                  pageNumber={pageNumber}
+                  width={Math.round(pageWidth * scale)}
+                  renderAnnotationLayer={false}
+                  renderTextLayer
+                  onRenderSuccess={() => onPageRenderSuccess(pageNumber)}
+                  onRenderError={(error) => onPageRenderError(pageNumber, error)}
+                />
+              </>
+            ) : (
+              <div
+                className="rounded border border-dashed border-[var(--border-default)]/70 bg-[var(--bg-surface-secondary)]/55"
+                style={{ height: getPlaceholderHeight(pageNumber) }}
+              />
+            )}
           </div>
-          <div className="mt-1 text-center text-xs text-slate-500">第 {pageNumber} 页</div>
+          <div className="mt-1 text-center text-xs text-[var(--text-secondary)]">第 {pageNumber} 页</div>
         </div>
       ))}
     </Document>

@@ -14,13 +14,15 @@ export function applyFilters(papers: Paper[], filters: PaperFilters): Paper[] {
       paper.authors.join(' ').toLowerCase().includes(query) ||
       paper.abstract.toLowerCase().includes(query) ||
       paper.category.toLowerCase().includes(query) ||
+      paper.tags.join(' ').toLowerCase().includes(query) ||
       `${paper.year ?? ''}`.includes(query);
 
     const hitCategory = filters.category === 'all' || paper.category === filters.category;
+    const hitTag = filters.tag === 'all' || paper.tags.includes(filters.tag);
     const hitRead = filters.readStatus === 'all' || paper.read_status === filters.readStatus;
     const hitFavorite = !filters.onlyFavorite || paper.is_favorite;
     const hitYear = !filters.year || paper.year === filters.year;
-    return hitQuery && hitCategory && hitRead && hitFavorite && hitYear;
+    return hitQuery && hitCategory && hitTag && hitRead && hitFavorite && hitYear;
   });
 
   result = [...result].sort((a, b) => {

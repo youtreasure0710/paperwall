@@ -3,6 +3,11 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
 
+const bootTheme = window.localStorage.getItem('paperwall-theme');
+if (bootTheme === 'dark') {
+  document.documentElement.classList.add('dark');
+}
+
 if (!(Promise as PromiseConstructor & { withResolvers?: unknown }).withResolvers) {
   (Promise as PromiseConstructor & {
     withResolvers: <T>() => {
